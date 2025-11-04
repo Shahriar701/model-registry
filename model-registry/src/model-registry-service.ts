@@ -5,6 +5,7 @@ import { S3Client, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { Logger } from './utils/logger';
 import { ModelRegistration, RegisterModelRequest, ListModelsRequest, ListModelsResponse, ModelSummary, DeploymentTriggerResponse, ModelStatus } from './types/model-types';
 import { ModelRegistryError, ErrorType } from './utils/error-handler';
+import { VersionUtils } from './utils/version-utils';
 
 export class ModelRegistryService {
   private readonly dynamoClient: DynamoDBDocumentClient;
@@ -110,44 +111,75 @@ export class ModelRegistryService {
       correlationId,
       teamId: request.teamId,
       deploymentTarget: request.deploymentTarget,
+      namePattern: request.namePattern,
+      framework: request.framework,
+      status: request.status,
       limit: request.limit,
     });
 
     const limit = Math.min(request.limit || 50, 100); // Cap at 100
     let command;
+    let filterExpressions: string[] = [];
+    let expressionAttributeValues: Record<string, any> = {};
+    let expressionAttributeNames: Record<string, string> = {};
+
+    // Build filter expressions for additional criteria
+    if (request.namePattern) {
+      filterExpressions.push('contains(modelName, :namePattern)');
+      expressionAttributeValues[':namePattern'] = request.namePattern;
+    }
+
+    if (request.framework) {
+      filterExpressions.push('framework = :framework');
+      expressionAttributeValues[':framework'] = request.framework;
+    }
+
+    if (request.status) {
+      filterExpressions.push('#status = :status');
+      expressionAttributeValues[':status'] = request.status;
+      expressionAttributeNames['#status'] = 'status';
+    }
 
     if (request.teamId) {
       // Query by team using GSI1
+      const keyConditionExpression = 'GSI1PK = :teamPK';
+      expressionAttributeValues[':teamPK'] = `TEAM#${request.teamId}`;
+
       command = new QueryCommand({
         TableName: this.tableName,
         IndexName: 'GSI1',
-        KeyConditionExpression: 'GSI1PK = :teamPK',
-        ExpressionAttributeValues: {
-          ':teamPK': `TEAM#${request.teamId}`,
-        },
+        KeyConditionExpression: keyConditionExpression,
+        FilterExpression: filterExpressions.length > 0 ? filterExpressions.join(' AND ') : undefined,
+        ExpressionAttributeValues: expressionAttributeValues,
+        ExpressionAttributeNames: Object.keys(expressionAttributeNames).length > 0 ? expressionAttributeNames : undefined,
         Limit: limit,
         ExclusiveStartKey: request.nextToken ? JSON.parse(Buffer.from(request.nextToken, 'base64').toString()) : undefined,
       });
     } else if (request.deploymentTarget) {
       // Query by deployment target using GSI2
+      const keyConditionExpression = 'GSI2PK = :deploymentPK';
+      expressionAttributeValues[':deploymentPK'] = `DEPLOYMENT#${request.deploymentTarget}`;
+
       command = new QueryCommand({
         TableName: this.tableName,
         IndexName: 'GSI2',
-        KeyConditionExpression: 'GSI2PK = :deploymentPK',
-        ExpressionAttributeValues: {
-          ':deploymentPK': `DEPLOYMENT#${request.deploymentTarget}`,
-        },
+        KeyConditionExpression: keyConditionExpression,
+        FilterExpression: filterExpressions.length > 0 ? filterExpressions.join(' AND ') : undefined,
+        ExpressionAttributeValues: expressionAttributeValues,
+        ExpressionAttributeNames: Object.keys(expressionAttributeNames).length > 0 ? expressionAttributeNames : undefined,
         Limit: limit,
         ExclusiveStartKey: request.nextToken ? JSON.parse(Buffer.from(request.nextToken, 'base64').toString()) : undefined,
       });
     } else {
       // Scan all models (less efficient, but needed for global listing)
+      filterExpressions.unshift('begins_with(PK, :modelPrefix)');
+      expressionAttributeValues[':modelPrefix'] = 'MODEL#';
+
       command = new ScanCommand({
         TableName: this.tableName,
-        FilterExpression: 'begins_with(PK, :modelPrefix)',
-        ExpressionAttributeValues: {
-          ':modelPrefix': 'MODEL#',
-        },
+        FilterExpression: filterExpressions.join(' AND '),
+        ExpressionAttributeValues: expressionAttributeValues,
+        ExpressionAttributeNames: Object.keys(expressionAttributeNames).length > 0 ? expressionAttributeNames : undefined,
         Limit: limit,
         ExclusiveStartKey: request.nextToken ? JSON.parse(Buffer.from(request.nextToken, 'base64').toString()) : undefined,
       });
@@ -260,6 +292,40 @@ export class ModelRegistryService {
     return result.Item as ModelRegistration;
   }
 
+  async getLatestModelVersion(modelId: string, teamId: string | undefined, correlationId: string): Promise<ModelRegistration> {
+    this.logger.info('Getting latest model version', {
+      correlationId,
+      modelId,
+      teamId,
+    });
+
+    // Get all versions of the model
+    const versions = await this.getModelVersions(modelId, teamId, correlationId);
+
+    if (versions.length === 0) {
+      throw new ModelRegistryError(
+        ErrorType.RESOURCE_NOT_FOUND,
+        `No versions found for model ${modelId}`,
+        404
+      );
+    }
+
+    // Find the latest version using semantic version comparison
+    const versionStrings = versions.map(v => v.version);
+    const latestVersionString = VersionUtils.getLatestVersion(versionStrings);
+
+    if (!latestVersionString) {
+      throw new ModelRegistryError(
+        ErrorType.INTERNAL_ERROR,
+        `Unable to determine latest version for model ${modelId}`,
+        500
+      );
+    }
+
+    // Return the model registration for the latest version
+    return versions.find(v => v.version === latestVersionString)!;
+  }
+
   async updateModelMetadata(modelId: string, version: string, metadata: any, teamId: string | undefined, correlationId: string): Promise<ModelRegistration> {
     this.logger.info('Updating model metadata', {
       correlationId,
@@ -365,6 +431,73 @@ export class ModelRegistryService {
       status: ModelStatus.DEPLOYING,
       modelId,
       version,
+    };
+  }
+
+  async getModelStatistics(teamId: string | undefined, correlationId: string): Promise<ModelStatistics> {
+    this.logger.info('Getting model statistics', {
+      correlationId,
+      teamId,
+    });
+
+    let command;
+    if (teamId) {
+      // Query by team using GSI1
+      command = new QueryCommand({
+        TableName: this.tableName,
+        IndexName: 'GSI1',
+        KeyConditionExpression: 'GSI1PK = :teamPK',
+        ExpressionAttributeValues: {
+          ':teamPK': `TEAM#${teamId}`,
+        },
+      });
+    } else {
+      // Scan all models
+      command = new ScanCommand({
+        TableName: this.tableName,
+        FilterExpression: 'begins_with(PK, :modelPrefix)',
+        ExpressionAttributeValues: {
+          ':modelPrefix': 'MODEL#',
+        },
+      });
+    }
+
+    const result = await this.dynamoClient.send(command);
+    const items = result.Items || [];
+
+    // Calculate statistics
+    const uniqueModels = new Set<string>();
+    const frameworkCounts: Record<string, number> = {};
+    const deploymentTargetCounts: Record<string, number> = {};
+    const statusCounts: Record<string, number> = {};
+    const teamCounts: Record<string, number> = {};
+
+    items.forEach(item => {
+      uniqueModels.add(item.modelId);
+      
+      // Count by framework
+      frameworkCounts[item.framework] = (frameworkCounts[item.framework] || 0) + 1;
+      
+      // Count by deployment target
+      deploymentTargetCounts[item.deploymentTarget] = (deploymentTargetCounts[item.deploymentTarget] || 0) + 1;
+      
+      // Count by status
+      statusCounts[item.status] = (statusCounts[item.status] || 0) + 1;
+      
+      // Count by team (only if not filtering by team)
+      if (!teamId) {
+        teamCounts[item.teamId] = (teamCounts[item.teamId] || 0) + 1;
+      }
+    });
+
+    return {
+      totalModels: uniqueModels.size,
+      totalVersions: items.length,
+      modelsByFramework: frameworkCounts,
+      modelsByDeploymentTarget: deploymentTargetCounts,
+      modelsByStatus: statusCounts,
+      modelsByTeam: teamCounts,
+      timestamp: new Date().toISOString(),
     };
   }
 

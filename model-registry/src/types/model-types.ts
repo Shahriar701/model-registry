@@ -84,6 +84,9 @@ export interface ListModelsRequest {
   nextToken?: string;
   teamId?: string;
   deploymentTarget?: DeploymentTarget;
+  namePattern?: string;
+  framework?: ModelFramework;
+  status?: ModelStatus;
 }
 
 export interface ListModelsResponse {
@@ -111,4 +114,14 @@ export interface HealthCheckResponse {
   status: string;
   timestamp: string;
   dependencies: Record<string, string>;
+}
+
+export interface ModelStatistics {
+  totalModels: number;
+  totalVersions: number;
+  modelsByFramework: Record<string, number>;
+  modelsByDeploymentTarget: Record<string, number>;
+  modelsByStatus: Record<string, number>;
+  modelsByTeam: Record<string, number>;
+  timestamp: string;
 }

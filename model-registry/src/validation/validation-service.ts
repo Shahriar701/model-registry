@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ModelFramework, DeploymentTarget } from '../types/model-types';
+import { ModelFramework, DeploymentTarget, ModelStatus } from '../types/model-types';
 import { ValidationResult } from '../types/model-types';
 
 export class ValidationService {
@@ -155,6 +155,45 @@ export class ValidationService {
         isValid: false, 
         errors: { 
           deploymentTarget: `Deployment target must be one of: ${Object.values(DeploymentTarget).join(', ')}` 
+        } 
+      };
+    }
+
+    return { isValid: true };
+  }
+
+  validateFramework(framework?: string): ValidationResult {
+    if (framework && !Object.values(ModelFramework).includes(framework as ModelFramework)) {
+      return { 
+        isValid: false, 
+        errors: { 
+          framework: `Framework must be one of: ${Object.values(ModelFramework).join(', ')}` 
+        } 
+      };
+    }
+
+    return { isValid: true };
+  }
+
+  validateModelStatus(status?: string): ValidationResult {
+    if (status && !Object.values(ModelStatus).includes(status as ModelStatus)) {
+      return { 
+        isValid: false, 
+        errors: { 
+          status: `Status must be one of: ${Object.values(ModelStatus).join(', ')}` 
+        } 
+      };
+    }
+
+    return { isValid: true };
+  }
+
+  validateNamePattern(namePattern?: string): ValidationResult {
+    if (namePattern && namePattern.length > 100) {
+      return { 
+        isValid: false, 
+        errors: { 
+          namePattern: 'Name pattern must be less than 100 characters' 
         } 
       };
     }

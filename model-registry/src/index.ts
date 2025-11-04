@@ -3,7 +3,7 @@ import { ModelRegistryService } from './model-registry-service';
 import { Logger } from './utils/logger';
 import { ErrorHandler, ErrorType } from './utils/error-handler';
 import { ValidationService } from './validation/validation-service';
-import { DeploymentTarget } from './types/model-types';
+import { DeploymentTarget, ModelFramework, ModelStatus } from './types/model-types';
 
 const logger = new Logger();
 const modelRegistryService = new ModelRegistryService();
@@ -37,6 +37,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       case 'GET /api/v1/models/{modelId}/{version}':
         return await getModelVersion(event, correlationId);
       
+      case 'GET /api/v1/models/{modelId}/latest':
+        return await getLatestModelVersion(event, correlationId);
+      
       case 'PUT /api/v1/models/{modelId}/{version}':
         return await updateModelMetadata(event, correlationId);
       
@@ -48,6 +51,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       
       case 'GET /api/v1/health':
         return await healthCheck(correlationId);
+      
+      case 'GET /api/v1/statistics':
+        return await getModelStatistics(event, correlationId);
       
       default:
         return errorHandler.createErrorResponse(
@@ -117,11 +123,40 @@ async function listModels(event: APIGatewayProxyEvent, correlationId: string): P
     const queryParams = event.queryStringParameters || {};
     const teamId = event.requestContext.authorizer?.teamId;
 
+    // Validate query parameters
+    const validationResults = [
+      validationService.validatePaginationParams(queryParams.limit, queryParams.nextToken),
+      validationService.validateDeploymentTarget(queryParams.deploymentTarget),
+      validationService.validateFramework(queryParams.framework),
+      validationService.validateModelStatus(queryParams.status),
+      validationService.validateNamePattern(queryParams.namePattern),
+    ];
+
+    const errors: Record<string, string> = {};
+    validationResults.forEach(result => {
+      if (!result.isValid && result.errors) {
+        Object.assign(errors, result.errors);
+      }
+    });
+
+    if (Object.keys(errors).length > 0) {
+      return errorHandler.createErrorResponse(
+        ErrorType.VALIDATION_ERROR,
+        'Invalid query parameters',
+        400,
+        correlationId,
+        errors
+      );
+    }
+
     const result = await modelRegistryService.listModels({
       limit: queryParams.limit ? parseInt(queryParams.limit) : undefined,
       nextToken: queryParams.nextToken,
       teamId: queryParams.teamId || teamId,
       deploymentTarget: queryParams.deploymentTarget as DeploymentTarget,
+      namePattern: queryParams.namePattern,
+      framework: queryParams.framework as ModelFramework,
+      status: queryParams.status as ModelStatus,
     }, correlationId);
 
     return {
@@ -163,6 +198,26 @@ async function getModelVersion(event: APIGatewayProxyEvent, correlationId: strin
     const teamId = event.requestContext.authorizer?.teamId;
 
     const result = await modelRegistryService.getModelVersion(modelId!, version!, teamId, correlationId);
+
+    return {
+      statusCode: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Correlation-ID': correlationId,
+      },
+      body: JSON.stringify(result),
+    };
+  } catch (error) {
+    return errorHandler.handleError(error, correlationId);
+  }
+}
+
+async function getLatestModelVersion(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
+  try {
+    const { modelId } = event.pathParameters!;
+    const teamId = event.requestContext.authorizer?.teamId;
+
+    const result = await modelRegistryService.getLatestModelVersion(modelId!, teamId, correlationId);
 
     return {
       statusCode: 200,
@@ -237,6 +292,29 @@ async function triggerDeployment(event: APIGatewayProxyEvent, correlationId: str
         'X-Correlation-ID': correlationId,
       },
       body: JSON.stringify(result),
+    };
+  } catch (error) {
+    return errorHandler.handleError(error, correlationId);
+  }
+}
+
+async function getModelStatistics(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
+  try {
+    const teamId = event.requestContext.authorizer?.teamId;
+    const queryParams = event.queryStringParameters || {};
+    
+    // Allow admin users to get statistics for specific teams or all teams
+    const requestedTeamId = queryParams.teamId || teamId;
+
+    const statistics = await modelRegistryService.getModelStatistics(requestedTeamId, correlationId);
+
+    return {
+      statusCode: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Correlation-ID': correlationId,
+      },
+      body: JSON.stringify(statistics),
     };
   } catch (error) {
     return errorHandler.handleError(error, correlationId);
