@@ -4,11 +4,15 @@ import { Logger } from './utils/logger';
 import { ErrorHandler, ErrorType } from './utils/error-handler';
 import { ValidationService } from './validation/validation-service';
 import { DeploymentTarget, ModelFramework, ModelStatus } from './types/model-types';
+import { AuthMiddleware, AuthContext } from './auth';
+import { AuditMiddleware } from './audit';
 
 const logger = new Logger();
 const modelRegistryService = new ModelRegistryService();
 const errorHandler = new ErrorHandler();
 const validationService = new ValidationService();
+const authMiddleware = new AuthMiddleware();
+const auditMiddleware = new AuditMiddleware();
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
   const correlationId = event.headers['X-Correlation-ID'] || event.headers['x-correlation-id'] || generateCorrelationId();
@@ -75,12 +79,46 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 };
 
 async function registerModel(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
+  let authContext: AuthContext | undefined;
+  let modelId: string | undefined;
+  let version: string | undefined;
+
   try {
+    // Authenticate the request
+    authContext = await authMiddleware.authenticate(event, correlationId);
+    
+    // Log authentication success
+    await auditMiddleware.logAuthentication(
+      correlationId,
+      authContext.keyId,
+      authContext.teamId,
+      'SUCCESS',
+      event
+    );
+    
+    // Check write permission
+    authMiddleware.checkPermission(authContext, 'models:write');
+
     const requestBody = JSON.parse(event.body || '{}');
+    modelId = requestBody.modelName; // Will be converted to modelId in service
+    version = requestBody.version;
     
     // Validate request
     const validationResult = validationService.validateRegisterModelRequest(requestBody);
     if (!validationResult.isValid) {
+      // Log validation failure
+      if (modelId && version) {
+        await auditMiddleware.logModelRegistration(
+          authContext,
+          correlationId,
+          modelId,
+          version,
+          'FAILURE',
+          event,
+          { validationErrors: validationResult.errors }
+        );
+      }
+
       return errorHandler.createErrorResponse(
         ErrorType.VALIDATION_ERROR,
         'Invalid request data',
@@ -90,13 +128,28 @@ async function registerModel(event: APIGatewayProxyEvent, correlationId: string)
       );
     }
 
-    // Extract team ID from authorizer context (if available)
-    const teamId = event.requestContext.authorizer?.teamId || 'default-team';
+    // Use authenticated team ID, but allow override for admin users
+    const teamId = authMiddleware.validateTeamAccess(authContext, requestBody.teamId);
 
     const result = await modelRegistryService.registerModel({
       ...requestBody,
       teamId,
     }, correlationId);
+
+    // Log successful model registration
+    await auditMiddleware.logModelRegistration(
+      authContext,
+      correlationId,
+      result.modelId,
+      requestBody.version,
+      'SUCCESS',
+      event,
+      {
+        modelName: requestBody.modelName,
+        framework: requestBody.framework,
+        deploymentTarget: requestBody.deploymentTarget,
+      }
+    );
 
     logger.info('Model registered successfully', {
       correlationId,
@@ -114,14 +167,46 @@ async function registerModel(event: APIGatewayProxyEvent, correlationId: string)
       body: JSON.stringify(result),
     };
   } catch (error) {
+    // Log authentication failure if auth failed
+    if (!authContext) {
+      await auditMiddleware.logAuthentication(
+        correlationId,
+        undefined,
+        undefined,
+        'FAILURE',
+        event,
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+    } else if (modelId && version) {
+      // Log model registration failure
+      await auditMiddleware.logModelRegistration(
+        authContext,
+        correlationId,
+        modelId,
+        version,
+        'FAILURE',
+        event,
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+    }
+
     return errorHandler.handleError(error, correlationId);
   }
 }
 
 async function listModels(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
   try {
+    // Authenticate the request
+    const authContext = await authMiddleware.authenticate(event, correlationId);
+    
+    // Check read permission
+    authMiddleware.checkPermission(authContext, 'models:read');
+
     const queryParams = event.queryStringParameters || {};
-    const teamId = event.requestContext.authorizer?.teamId;
+    
+    // Determine which team's models to list
+    const requestedTeamId = queryParams.teamId;
+    const teamId = authMiddleware.validateTeamAccess(authContext, requestedTeamId);
 
     // Validate query parameters
     const validationResults = [
@@ -174,10 +259,15 @@ async function listModels(event: APIGatewayProxyEvent, correlationId: string): P
 
 async function getModelVersions(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
   try {
-    const { modelId } = event.pathParameters!;
-    const teamId = event.requestContext.authorizer?.teamId;
+    // Authenticate the request
+    const authContext = await authMiddleware.authenticate(event, correlationId);
+    
+    // Check read permission
+    authMiddleware.checkPermission(authContext, 'models:read');
 
-    const result = await modelRegistryService.getModelVersions(modelId!, teamId, correlationId);
+    const { modelId } = event.pathParameters!;
+
+    const result = await modelRegistryService.getModelVersions(modelId!, authContext, correlationId);
 
     return {
       statusCode: 200,
@@ -193,11 +283,27 @@ async function getModelVersions(event: APIGatewayProxyEvent, correlationId: stri
 }
 
 async function getModelVersion(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
-  try {
-    const { modelId, version } = event.pathParameters!;
-    const teamId = event.requestContext.authorizer?.teamId;
+  let authContext: AuthContext | undefined;
+  const { modelId, version } = event.pathParameters!;
 
-    const result = await modelRegistryService.getModelVersion(modelId!, version!, teamId, correlationId);
+  try {
+    // Authenticate the request
+    authContext = await authMiddleware.authenticate(event, correlationId);
+    
+    // Check read permission
+    authMiddleware.checkPermission(authContext, 'models:read');
+
+    const result = await modelRegistryService.getModelVersion(modelId!, version!, authContext, correlationId);
+
+    // Log successful model access
+    await auditMiddleware.logModelAccess(
+      authContext,
+      correlationId,
+      modelId!,
+      version!,
+      'SUCCESS',
+      event
+    );
 
     return {
       statusCode: 200,
@@ -208,16 +314,34 @@ async function getModelVersion(event: APIGatewayProxyEvent, correlationId: strin
       body: JSON.stringify(result),
     };
   } catch (error) {
+    // Log model access failure
+    if (authContext && modelId && version) {
+      await auditMiddleware.logModelAccess(
+        authContext,
+        correlationId,
+        modelId,
+        version,
+        'FAILURE',
+        event,
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+    }
+
     return errorHandler.handleError(error, correlationId);
   }
 }
 
 async function getLatestModelVersion(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
   try {
-    const { modelId } = event.pathParameters!;
-    const teamId = event.requestContext.authorizer?.teamId;
+    // Authenticate the request
+    const authContext = await authMiddleware.authenticate(event, correlationId);
+    
+    // Check read permission
+    authMiddleware.checkPermission(authContext, 'models:read');
 
-    const result = await modelRegistryService.getLatestModelVersion(modelId!, teamId, correlationId);
+    const { modelId } = event.pathParameters!;
+
+    const result = await modelRegistryService.getLatestModelVersion(modelId!, authContext, correlationId);
 
     return {
       statusCode: 200,
@@ -233,17 +357,35 @@ async function getLatestModelVersion(event: APIGatewayProxyEvent, correlationId:
 }
 
 async function updateModelMetadata(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
+  let authContext: AuthContext | undefined;
+  const { modelId, version } = event.pathParameters!;
+
   try {
-    const { modelId, version } = event.pathParameters!;
+    // Authenticate the request
+    authContext = await authMiddleware.authenticate(event, correlationId);
+    
+    // Check write permission
+    authMiddleware.checkPermission(authContext, 'models:write');
+
     const requestBody = JSON.parse(event.body || '{}');
-    const teamId = event.requestContext.authorizer?.teamId;
 
     const result = await modelRegistryService.updateModelMetadata(
       modelId!,
       version!,
       requestBody,
-      teamId,
+      authContext,
       correlationId
+    );
+
+    // Log successful model update
+    await auditMiddleware.logModelUpdate(
+      authContext,
+      correlationId,
+      modelId!,
+      version!,
+      'SUCCESS',
+      event,
+      { updatedFields: Object.keys(requestBody) }
     );
 
     return {
@@ -255,16 +397,45 @@ async function updateModelMetadata(event: APIGatewayProxyEvent, correlationId: s
       body: JSON.stringify(result),
     };
   } catch (error) {
+    // Log model update failure
+    if (authContext && modelId && version) {
+      await auditMiddleware.logModelUpdate(
+        authContext,
+        correlationId,
+        modelId,
+        version,
+        'FAILURE',
+        event,
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+    }
+
     return errorHandler.handleError(error, correlationId);
   }
 }
 
 async function deregisterModel(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
-  try {
-    const { modelId, version } = event.pathParameters!;
-    const teamId = event.requestContext.authorizer?.teamId;
+  let authContext: AuthContext | undefined;
+  const { modelId, version } = event.pathParameters!;
 
-    await modelRegistryService.deregisterModel(modelId!, version!, teamId, correlationId);
+  try {
+    // Authenticate the request
+    authContext = await authMiddleware.authenticate(event, correlationId);
+    
+    // Check write permission
+    authMiddleware.checkPermission(authContext, 'models:write');
+
+    await modelRegistryService.deregisterModel(modelId!, version!, authContext, correlationId);
+
+    // Log successful model deletion
+    await auditMiddleware.logModelDeletion(
+      authContext,
+      correlationId,
+      modelId!,
+      version!,
+      'SUCCESS',
+      event
+    );
 
     return {
       statusCode: 204,
@@ -274,16 +445,46 @@ async function deregisterModel(event: APIGatewayProxyEvent, correlationId: strin
       body: '',
     };
   } catch (error) {
+    // Log model deletion failure
+    if (authContext && modelId && version) {
+      await auditMiddleware.logModelDeletion(
+        authContext,
+        correlationId,
+        modelId,
+        version,
+        'FAILURE',
+        event,
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+    }
+
     return errorHandler.handleError(error, correlationId);
   }
 }
 
 async function triggerDeployment(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
-  try {
-    const { modelId, version } = event.pathParameters!;
-    const teamId = event.requestContext.authorizer?.teamId;
+  let authContext: AuthContext | undefined;
+  const { modelId, version } = event.pathParameters!;
 
-    const result = await modelRegistryService.triggerDeployment(modelId!, version!, teamId, correlationId);
+  try {
+    // Authenticate the request
+    authContext = await authMiddleware.authenticate(event, correlationId);
+    
+    // Check deploy permission
+    authMiddleware.checkPermission(authContext, 'models:deploy');
+
+    const result = await modelRegistryService.triggerDeployment(modelId!, version!, authContext, correlationId);
+
+    // Log successful deployment trigger
+    await auditMiddleware.logModelDeployment(
+      authContext,
+      correlationId,
+      modelId!,
+      version!,
+      'SUCCESS',
+      event,
+      { deploymentId: result.deploymentId }
+    );
 
     return {
       statusCode: 202,
@@ -294,19 +495,38 @@ async function triggerDeployment(event: APIGatewayProxyEvent, correlationId: str
       body: JSON.stringify(result),
     };
   } catch (error) {
+    // Log deployment failure
+    if (authContext && modelId && version) {
+      await auditMiddleware.logModelDeployment(
+        authContext,
+        correlationId,
+        modelId,
+        version,
+        'FAILURE',
+        event,
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+    }
+
     return errorHandler.handleError(error, correlationId);
   }
 }
 
 async function getModelStatistics(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
   try {
-    const teamId = event.requestContext.authorizer?.teamId;
+    // Authenticate the request
+    const authContext = await authMiddleware.authenticate(event, correlationId);
+    
+    // Check read permission
+    authMiddleware.checkPermission(authContext, 'models:read');
+
     const queryParams = event.queryStringParameters || {};
     
     // Allow admin users to get statistics for specific teams or all teams
-    const requestedTeamId = queryParams.teamId || teamId;
+    const requestedTeamId = queryParams.teamId;
+    const teamId = authMiddleware.validateTeamAccess(authContext, requestedTeamId);
 
-    const statistics = await modelRegistryService.getModelStatistics(requestedTeamId, correlationId);
+    const statistics = await modelRegistryService.getModelStatistics(teamId, correlationId);
 
     return {
       statusCode: 200,

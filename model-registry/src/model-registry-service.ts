@@ -3,9 +3,11 @@ import { DynamoDBDocumentClient, PutCommand, GetCommand, QueryCommand, UpdateCom
 import { CloudWatchClient, PutMetricDataCommand } from '@aws-sdk/client-cloudwatch';
 import { S3Client, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { Logger } from './utils/logger';
-import { ModelRegistration, RegisterModelRequest, ListModelsRequest, ListModelsResponse, ModelSummary, DeploymentTriggerResponse, ModelStatus } from './types/model-types';
+import { ModelRegistration, RegisterModelRequest, ListModelsRequest, ListModelsResponse, ModelSummary, DeploymentTriggerResponse, ModelStatus, ModelStatistics } from './types/model-types';
 import { ModelRegistryError, ErrorType } from './utils/error-handler';
 import { VersionUtils } from './utils/version-utils';
+import { TeamAccessControl } from './auth/team-access-control';
+import { AuthContext } from './auth/auth-service';
 
 export class ModelRegistryService {
   private readonly dynamoClient: DynamoDBDocumentClient;
@@ -13,6 +15,7 @@ export class ModelRegistryService {
   private readonly s3Client: S3Client;
   private readonly logger: Logger;
   private readonly tableName: string;
+  private readonly teamAccessControl: TeamAccessControl;
 
   constructor() {
     const dynamoDBClient = new DynamoDBClient({});
@@ -21,6 +24,7 @@ export class ModelRegistryService {
     this.s3Client = new S3Client({});
     this.logger = new Logger();
     this.tableName = process.env.MODELS_TABLE_NAME!;
+    this.teamAccessControl = new TeamAccessControl();
 
     if (!this.tableName) {
       throw new Error('MODELS_TABLE_NAME environment variable is required');
@@ -212,11 +216,11 @@ export class ModelRegistryService {
     };
   }
 
-  async getModelVersions(modelId: string, teamId: string | undefined, correlationId: string): Promise<ModelRegistration[]> {
+  async getModelVersions(modelId: string, authContext: AuthContext, correlationId: string): Promise<ModelRegistration[]> {
     this.logger.info('Getting model versions', {
       correlationId,
       modelId,
-      teamId,
+      teamId: authContext.teamId,
     });
 
     const command = new QueryCommand({
@@ -238,28 +242,52 @@ export class ModelRegistryService {
       );
     }
 
-    // Filter by team if specified
-    const filteredItems = teamId 
-      ? result.Items.filter(item => item.teamId === teamId)
-      : result.Items;
+    // Filter versions based on team access control
+    const accessibleVersions: ModelRegistration[] = [];
+    
+    for (const item of result.Items) {
+      const modelVersion = item as ModelRegistration;
+      
+      try {
+        // Check if user can access this version
+        const canAccess = await this.teamAccessControl.canAccessModel(
+          authContext,
+          modelId,
+          modelVersion.version,
+          'read',
+          correlationId
+        );
+        
+        if (canAccess) {
+          accessibleVersions.push(modelVersion);
+        }
+      } catch (error) {
+        this.logger.warn('Error checking access for model version', {
+          correlationId,
+          modelId,
+          version: modelVersion.version,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
 
-    if (filteredItems.length === 0) {
+    if (accessibleVersions.length === 0) {
       throw new ModelRegistryError(
         ErrorType.RESOURCE_NOT_FOUND,
-        `Model ${modelId} not found for team ${teamId}`,
+        `Model ${modelId} not found or access denied`,
         404
       );
     }
 
-    return filteredItems as ModelRegistration[];
+    return accessibleVersions;
   }
 
-  async getModelVersion(modelId: string, version: string, teamId: string | undefined, correlationId: string): Promise<ModelRegistration> {
+  async getModelVersion(modelId: string, version: string, authContext: AuthContext, correlationId: string): Promise<ModelRegistration> {
     this.logger.info('Getting model version', {
       correlationId,
       modelId,
       version,
-      teamId,
+      teamId: authContext.teamId,
     });
 
     const command = new GetCommand({
@@ -280,32 +308,32 @@ export class ModelRegistryService {
       );
     }
 
-    // Check team access if specified
-    if (teamId && result.Item.teamId !== teamId) {
-      throw new ModelRegistryError(
-        ErrorType.RESOURCE_NOT_FOUND,
-        `Model ${modelId} version ${version} not found for team ${teamId}`,
-        404
-      );
-    }
+    // Validate team access using access control
+    await this.teamAccessControl.validateModelAccess(
+      authContext,
+      modelId,
+      version,
+      'read',
+      correlationId
+    );
 
     return result.Item as ModelRegistration;
   }
 
-  async getLatestModelVersion(modelId: string, teamId: string | undefined, correlationId: string): Promise<ModelRegistration> {
+  async getLatestModelVersion(modelId: string, authContext: AuthContext, correlationId: string): Promise<ModelRegistration> {
     this.logger.info('Getting latest model version', {
       correlationId,
       modelId,
-      teamId,
+      teamId: authContext.teamId,
     });
 
-    // Get all versions of the model
-    const versions = await this.getModelVersions(modelId, teamId, correlationId);
+    // Get all accessible versions of the model
+    const versions = await this.getModelVersions(modelId, authContext, correlationId);
 
     if (versions.length === 0) {
       throw new ModelRegistryError(
         ErrorType.RESOURCE_NOT_FOUND,
-        `No versions found for model ${modelId}`,
+        `No accessible versions found for model ${modelId}`,
         404
       );
     }
@@ -326,16 +354,22 @@ export class ModelRegistryService {
     return versions.find(v => v.version === latestVersionString)!;
   }
 
-  async updateModelMetadata(modelId: string, version: string, metadata: any, teamId: string | undefined, correlationId: string): Promise<ModelRegistration> {
+  async updateModelMetadata(modelId: string, version: string, metadata: any, authContext: AuthContext, correlationId: string): Promise<ModelRegistration> {
     this.logger.info('Updating model metadata', {
       correlationId,
       modelId,
       version,
-      teamId,
+      teamId: authContext.teamId,
     });
 
-    // First, verify the model exists and team has access
-    await this.getModelVersion(modelId, version, teamId, correlationId);
+    // Validate write access to the model
+    await this.teamAccessControl.validateModelAccess(
+      authContext,
+      modelId,
+      version,
+      'write',
+      correlationId
+    );
 
     const timestamp = new Date().toISOString();
 
@@ -357,16 +391,22 @@ export class ModelRegistryService {
     return result.Attributes as ModelRegistration;
   }
 
-  async deregisterModel(modelId: string, version: string, teamId: string | undefined, correlationId: string): Promise<void> {
+  async deregisterModel(modelId: string, version: string, authContext: AuthContext, correlationId: string): Promise<void> {
     this.logger.info('Deregistering model', {
       correlationId,
       modelId,
       version,
-      teamId,
+      teamId: authContext.teamId,
     });
 
-    // First, verify the model exists and team has access
-    await this.getModelVersion(modelId, version, teamId, correlationId);
+    // Validate write access to the model
+    await this.teamAccessControl.validateModelAccess(
+      authContext,
+      modelId,
+      version,
+      'write',
+      correlationId
+    );
 
     const command = new DeleteCommand({
       TableName: this.tableName,
@@ -380,20 +420,29 @@ export class ModelRegistryService {
 
     // Emit CloudWatch metrics
     await this.emitMetrics('ModelDeregistered', 1, {
-      TeamId: teamId || 'unknown',
+      TeamId: authContext.teamId,
     }, correlationId);
   }
 
-  async triggerDeployment(modelId: string, version: string, teamId: string | undefined, correlationId: string): Promise<DeploymentTriggerResponse> {
+  async triggerDeployment(modelId: string, version: string, authContext: AuthContext, correlationId: string): Promise<DeploymentTriggerResponse> {
     this.logger.info('Triggering deployment', {
       correlationId,
       modelId,
       version,
-      teamId,
+      teamId: authContext.teamId,
     });
 
+    // Validate deploy access to the model
+    await this.teamAccessControl.validateModelAccess(
+      authContext,
+      modelId,
+      version,
+      'deploy',
+      correlationId
+    );
+
     // Get model details
-    const model = await this.getModelVersion(modelId, version, teamId, correlationId);
+    const model = await this.getModelVersion(modelId, version, authContext, correlationId);
 
     // Update model status to DEPLOYING
     const timestamp = new Date().toISOString();

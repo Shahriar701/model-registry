@@ -13,17 +13,13 @@ export class ValidationService {
       .min(1, 'Version is required')
       .regex(/^\d+\.\d+\.\d+$/, 'Version must follow semantic versioning format (e.g., 1.0.0)'),
     
-    framework: z.nativeEnum(ModelFramework, {
-      errorMap: () => ({ message: `Framework must be one of: ${Object.values(ModelFramework).join(', ')}` })
-    }),
+    framework: z.nativeEnum(ModelFramework),
     
     s3Uri: z.string()
       .min(1, 'S3 URI is required')
       .regex(/^s3:\/\/[a-z0-9.-]+\/.*$/, 'S3 URI must be in format s3://bucket/key'),
     
-    deploymentTarget: z.nativeEnum(DeploymentTarget, {
-      errorMap: () => ({ message: `Deployment target must be one of: ${Object.values(DeploymentTarget).join(', ')}` })
-    }),
+    deploymentTarget: z.nativeEnum(DeploymentTarget),
     
     metadata: z.object({
       description: z.string().max(1000).optional(),
@@ -31,7 +27,7 @@ export class ValidationService {
       features: z.array(z.string()).max(100).optional(),
       modelSize: z.number().positive().optional(),
       trainingDataset: z.string().max(500).optional(),
-      hyperparameters: z.record(z.any()).optional(),
+      hyperparameters: z.record(z.string(), z.any()).optional(),
       tags: z.array(z.string().max(50)).max(20).optional(),
     }).optional(),
   });
@@ -42,7 +38,7 @@ export class ValidationService {
     features: z.array(z.string()).max(100).optional(),
     modelSize: z.number().positive().optional(),
     trainingDataset: z.string().max(500).optional(),
-    hyperparameters: z.record(z.any()).optional(),
+    hyperparameters: z.record(z.string(), z.any()).optional(),
     tags: z.array(z.string().max(50)).max(20).optional(),
   });
 
@@ -53,9 +49,9 @@ export class ValidationService {
     } catch (error) {
       if (error instanceof z.ZodError) {
         const errors: Record<string, string> = {};
-        error.errors.forEach(err => {
-          const path = err.path.join('.');
-          errors[path] = err.message;
+        error.issues.forEach((issue: any) => {
+          const path = issue.path.join('.');
+          errors[path] = issue.message;
         });
         return { isValid: false, errors };
       }
@@ -70,9 +66,9 @@ export class ValidationService {
     } catch (error) {
       if (error instanceof z.ZodError) {
         const errors: Record<string, string> = {};
-        error.errors.forEach(err => {
-          const path = err.path.join('.');
-          errors[path] = err.message;
+        error.issues.forEach((issue: any) => {
+          const path = issue.path.join('.');
+          errors[path] = issue.message;
         });
         return { isValid: false, errors };
       }
