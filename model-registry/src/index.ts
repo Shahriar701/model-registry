@@ -7,6 +7,7 @@ import { DeploymentTarget, ModelFramework, ModelStatus } from './types/model-typ
 import { AuthMiddleware, AuthContext } from './auth';
 import { AuditMiddleware } from './audit';
 import { MetricsService, PerformanceMonitor } from './monitoring';
+import { AIAssistantService } from './services/ai-assistant-service';
 
 const logger = new Logger();
 const modelRegistryService = new ModelRegistryService();
@@ -16,6 +17,12 @@ const authMiddleware = new AuthMiddleware();
 const auditMiddleware = new AuditMiddleware();
 const metricsService = new MetricsService();
 const performanceMonitor = new PerformanceMonitor(metricsService);
+
+// Initialize AI Assistant Service
+const aiAssistantService = new AIAssistantService(
+  modelRegistryService.getDynamoClient(),
+  modelRegistryService.getTableName()
+);
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
   const correlationId = event.headers['X-Correlation-ID'] || event.headers['x-correlation-id'] || generateCorrelationId();
@@ -70,6 +77,32 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
           
           case 'GET /api/v1/statistics':
             return await getModelStatistics(event, correlationId);
+          
+          // AI Assistant endpoints
+          case 'GET /api/v1/ai/models':
+            return await getModelsForRAG(event, correlationId);
+          
+          case 'POST /api/v1/ai/search':
+            return await searchModelsForAI(event, correlationId);
+          
+          case 'GET /api/v1/ai/summary':
+            return await getModelSummaryForAI(correlationId);
+          
+          case 'GET /api/v1/ai/models/{modelId}':
+            return await getModelForAI(event, correlationId);
+          
+          // Deployment pipeline webhook endpoints
+          case 'POST /api/v1/deployments/{deploymentId}/status':
+            return await updateDeploymentStatus(event, correlationId);
+          
+          case 'GET /api/v1/deployments/history':
+            return await getDeploymentHistory(event, correlationId);
+          
+          case 'GET /api/v1/models/{modelId}/{version}/deployments':
+            return await getModelDeploymentHistory(event, correlationId);
+          
+          case 'POST /api/v1/deployments/{deploymentId}/cancel':
+            return await cancelDeployment(event, correlationId);
           
           default:
             const errorResponse = errorHandler.createErrorResponse(
@@ -652,6 +685,283 @@ function generateCorrelationId(): string {
   return `mr-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 }
 
+async function getModelsForRAG(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
+  try {
+    // Authenticate the request
+    const authContext = await authMiddleware.authenticate(event, correlationId);
+    
+    // Check read permission
+    authMiddleware.checkPermission(authContext, 'models:read');
+
+    const queryParams = event.queryStringParameters || {};
+    const teamId = queryParams.teamId || authContext.teamId;
+
+    // Validate team access
+    authMiddleware.validateTeamAccess(authContext, teamId);
+
+    const models = await aiAssistantService.getModelsForRAG(teamId, correlationId);
+
+    return {
+      statusCode: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Correlation-ID': correlationId,
+      },
+      body: JSON.stringify({
+        models,
+        metadata: {
+          totalCount: models.length,
+          teamId,
+          timestamp: new Date().toISOString(),
+        },
+      }),
+    };
+  } catch (error) {
+    return errorHandler.handleError(error, correlationId);
+  }
+}
+
+async function searchModelsForAI(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
+  try {
+    // Authenticate the request
+    const authContext = await authMiddleware.authenticate(event, correlationId);
+    
+    // Check read permission
+    authMiddleware.checkPermission(authContext, 'models:read');
+
+    const requestBody = JSON.parse(event.body || '{}');
+    
+    // Validate team access if teamId is specified
+    if (requestBody.teamId) {
+      authMiddleware.validateTeamAccess(authContext, requestBody.teamId);
+    } else {
+      // Default to user's team if not specified
+      requestBody.teamId = authContext.teamId;
+    }
+
+    const searchResult = await aiAssistantService.searchModels(requestBody, correlationId);
+
+    return {
+      statusCode: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Correlation-ID': correlationId,
+      },
+      body: JSON.stringify(searchResult),
+    };
+  } catch (error) {
+    return errorHandler.handleError(error, correlationId);
+  }
+}
+
+async function getModelSummaryForAI(correlationId: string): Promise<APIGatewayProxyResult> {
+  try {
+    // Note: This endpoint might be used by the AI assistant without user authentication
+    // For now, we'll make it public but consider adding API key authentication later
+    const summary = await aiAssistantService.getModelSummaryForAI(correlationId);
+
+    return {
+      statusCode: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Correlation-ID': correlationId,
+      },
+      body: JSON.stringify(summary),
+    };
+  } catch (error) {
+    return errorHandler.handleError(error, correlationId);
+  }
+}
+
+async function getModelForAI(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
+  try {
+    // Authenticate the request
+    const authContext = await authMiddleware.authenticate(event, correlationId);
+    
+    // Check read permission
+    authMiddleware.checkPermission(authContext, 'models:read');
+
+    const { modelId } = event.pathParameters!;
+    const queryParams = event.queryStringParameters || {};
+    const version = queryParams.version;
+
+    const model = await aiAssistantService.getModelForAI(modelId!, version, correlationId);
+
+    if (!model) {
+      return errorHandler.createErrorResponse(
+        ErrorType.RESOURCE_NOT_FOUND,
+        `Model ${modelId} not found`,
+        404,
+        correlationId
+      );
+    }
+
+    // Check if user can access this model (basic team check)
+    if (model.teamId !== authContext.teamId && !authContext.permissions.includes('admin')) {
+      return errorHandler.createErrorResponse(
+        ErrorType.UNAUTHORIZED,
+        'Access denied to this model',
+        403,
+        correlationId
+      );
+    }
+
+    return {
+      statusCode: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Correlation-ID': correlationId,
+      },
+      body: JSON.stringify(model),
+    };
+  } catch (error) {
+    return errorHandler.handleError(error, correlationId);
+  }
+}
+
+async function updateDeploymentStatus(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
+  try {
+    // This endpoint is typically called by deployment pipelines, so we might use API key auth instead of user auth
+    // For now, we'll use the same auth middleware but consider adding API key authentication later
+    const authContext = await authMiddleware.authenticate(event, correlationId);
+    
+    // Check deploy permission (deployment pipelines should have this permission)
+    authMiddleware.checkPermission(authContext, 'models:deploy');
+
+    const { deploymentId } = event.pathParameters!;
+    const requestBody = JSON.parse(event.body || '{}');
+
+    const deploymentPipelineService = modelRegistryService.getDeploymentPipelineService();
+    
+    await deploymentPipelineService.updateDeploymentStatus({
+      deploymentId: deploymentId!,
+      status: requestBody.status,
+      metadata: requestBody.metadata,
+      error: requestBody.error,
+    }, correlationId);
+
+    return {
+      statusCode: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Correlation-ID': correlationId,
+      },
+      body: JSON.stringify({
+        message: 'Deployment status updated successfully',
+        deploymentId,
+        status: requestBody.status,
+      }),
+    };
+  } catch (error) {
+    return errorHandler.handleError(error, correlationId);
+  }
+}
+
+async function getDeploymentHistory(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
+  try {
+    const authContext = await authMiddleware.authenticate(event, correlationId);
+    
+    // Check read permission
+    authMiddleware.checkPermission(authContext, 'models:read');
+
+    const queryParams = event.queryStringParameters || {};
+    
+    // Validate team access if teamId is specified
+    const teamId = queryParams.teamId ? authMiddleware.validateTeamAccess(authContext, queryParams.teamId) : authContext.teamId;
+
+    const deploymentPipelineService = modelRegistryService.getDeploymentPipelineService();
+    
+    const history = await deploymentPipelineService.getDeploymentHistory({
+      deploymentId: queryParams.deploymentId,
+      teamId,
+      status: queryParams.status as any,
+      deploymentTarget: queryParams.deploymentTarget as any,
+      startDate: queryParams.startDate,
+      endDate: queryParams.endDate,
+      limit: queryParams.limit ? parseInt(queryParams.limit) : undefined,
+      nextToken: queryParams.nextToken,
+    }, correlationId);
+
+    return {
+      statusCode: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Correlation-ID': correlationId,
+      },
+      body: JSON.stringify(history),
+    };
+  } catch (error) {
+    return errorHandler.handleError(error, correlationId);
+  }
+}
+
+async function getModelDeploymentHistory(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
+  try {
+    const authContext = await authMiddleware.authenticate(event, correlationId);
+    
+    // Check read permission
+    authMiddleware.checkPermission(authContext, 'models:read');
+
+    const { modelId, version } = event.pathParameters!;
+    const queryParams = event.queryStringParameters || {};
+
+    const deploymentPipelineService = modelRegistryService.getDeploymentPipelineService();
+    
+    const history = await deploymentPipelineService.getDeploymentHistory({
+      modelId: modelId!,
+      version: version!,
+      status: queryParams.status as any,
+      startDate: queryParams.startDate,
+      endDate: queryParams.endDate,
+      limit: queryParams.limit ? parseInt(queryParams.limit) : undefined,
+      nextToken: queryParams.nextToken,
+    }, correlationId);
+
+    return {
+      statusCode: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Correlation-ID': correlationId,
+      },
+      body: JSON.stringify(history),
+    };
+  } catch (error) {
+    return errorHandler.handleError(error, correlationId);
+  }
+}
+
+async function cancelDeployment(event: APIGatewayProxyEvent, correlationId: string): Promise<APIGatewayProxyResult> {
+  try {
+    const authContext = await authMiddleware.authenticate(event, correlationId);
+    
+    // Check deploy permission
+    authMiddleware.checkPermission(authContext, 'models:deploy');
+
+    const { deploymentId } = event.pathParameters!;
+    const requestBody = JSON.parse(event.body || '{}');
+    const reason = requestBody.reason || 'Cancelled by user';
+
+    const deploymentPipelineService = modelRegistryService.getDeploymentPipelineService();
+    
+    await deploymentPipelineService.cancelDeployment(deploymentId!, reason, correlationId);
+
+    return {
+      statusCode: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Correlation-ID': correlationId,
+      },
+      body: JSON.stringify({
+        message: 'Deployment cancelled successfully',
+        deploymentId,
+        reason,
+      }),
+    };
+  } catch (error) {
+    return errorHandler.handleError(error, correlationId);
+  }
+}
+
 function getOperationName(route: string): string {
   const operationMap: Record<string, string> = {
     'POST /api/v1/models': 'RegisterModel',
@@ -665,6 +975,14 @@ function getOperationName(route: string): string {
     'GET /api/v1/health': 'HealthCheck',
     'GET /api/v1/health/simple': 'SimpleHealthCheck',
     'GET /api/v1/statistics': 'GetStatistics',
+    'GET /api/v1/ai/models': 'GetModelsForRAG',
+    'POST /api/v1/ai/search': 'SearchModelsForAI',
+    'GET /api/v1/ai/summary': 'GetModelSummaryForAI',
+    'GET /api/v1/ai/models/{modelId}': 'GetModelForAI',
+    'POST /api/v1/deployments/{deploymentId}/status': 'UpdateDeploymentStatus',
+    'GET /api/v1/deployments/history': 'GetDeploymentHistory',
+    'GET /api/v1/models/{modelId}/{version}/deployments': 'GetModelDeploymentHistory',
+    'POST /api/v1/deployments/{deploymentId}/cancel': 'CancelDeployment',
   };
   
   return operationMap[route] || 'UnknownOperation';

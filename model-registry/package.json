@@ -15,6 +15,7 @@
     "@aws-sdk/client-cloudwatch": "^3.0.0",
     "@aws-sdk/client-cloudwatch-logs": "^3.0.0",
     "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/client-eventbridge": "^3.922.0",
     "@aws-sdk/client-s3": "^3.0.0",
     "@aws-sdk/client-sns": "^3.922.0",
     "@aws-sdk/lib-dynamodb": "^3.0.0",

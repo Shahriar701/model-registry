@@ -8,6 +8,7 @@ import { VersionUtils } from './utils/version-utils';
 import { TeamAccessControl } from './auth/team-access-control';
 import { AuthContext } from './auth/auth-service';
 import { MetricsService, PerformanceMonitor, HealthService, AlertingService } from './monitoring';
+import { DeploymentPipelineService } from './services/deployment-pipeline-service';
 
 export class ModelRegistryService {
   private readonly dynamoClient: DynamoDBDocumentClient;
@@ -19,6 +20,7 @@ export class ModelRegistryService {
   private readonly performanceMonitor: PerformanceMonitor;
   private readonly healthService: HealthService;
   private readonly alertingService: AlertingService;
+  private readonly deploymentPipelineService: DeploymentPipelineService;
 
   constructor() {
     const dynamoDBClient = new DynamoDBClient({});
@@ -31,10 +33,30 @@ export class ModelRegistryService {
     this.performanceMonitor = new PerformanceMonitor(this.metricsService);
     this.healthService = new HealthService(this.metricsService);
     this.alertingService = new AlertingService();
+    this.deploymentPipelineService = new DeploymentPipelineService(
+      this.dynamoClient,
+      this.tableName,
+      process.env.EVENT_BUS_NAME
+    );
 
     if (!this.tableName) {
       throw new Error('MODELS_TABLE_NAME environment variable is required');
     }
+  }
+
+  // Getter for DynamoDB client to support dependency injection
+  public getDynamoClient(): DynamoDBDocumentClient {
+    return this.dynamoClient;
+  }
+
+  // Getter for table name
+  public getTableName(): string {
+    return this.tableName;
+  }
+
+  // Getter for deployment pipeline service
+  public getDeploymentPipelineService(): DeploymentPipelineService {
+    return this.deploymentPipelineService;
   }
 
   async registerModel(request: RegisterModelRequest, correlationId: string): Promise<{ modelId: string; message: string; registrationTime: string }> {
@@ -461,29 +483,18 @@ export class ModelRegistryService {
     // Get model details
     const model = await this.getModelVersion(modelId, version, authContext, correlationId);
 
-    // Update model status to DEPLOYING
-    const timestamp = new Date().toISOString();
-    await this.dynamoClient.send(new UpdateCommand({
-      TableName: this.tableName,
-      Key: {
-        PK: `MODEL#${modelId}`,
-        SK: `VERSION#${version}`,
+    // Use deployment pipeline service to trigger deployment
+    const deploymentResult = await this.deploymentPipelineService.triggerDeployment({
+      modelId,
+      version,
+      deploymentTarget: model.deploymentTarget,
+      teamId: model.teamId,
+      metadata: {
+        framework: model.framework,
+        s3Uri: model.s3Uri,
+        modelMetadata: model.metadata,
       },
-      UpdateExpression: 'SET #status = :status, updatedAt = :updatedAt',
-      ExpressionAttributeNames: {
-        '#status': 'status',
-      },
-      ExpressionAttributeValues: {
-        ':status': ModelStatus.DEPLOYING,
-        ':updatedAt': timestamp,
-      },
-    }));
-
-    // Generate deployment ID
-    const deploymentId = `deploy-${modelId}-${version}-${Date.now()}`;
-
-    // TODO: Publish deployment event to EventBridge
-    // This would trigger the actual deployment pipeline
+    }, correlationId);
 
     // Emit CloudWatch metrics
     await this.metricsService.recordDeploymentTrigger(
@@ -493,9 +504,9 @@ export class ModelRegistryService {
     );
 
     return {
-      deploymentId,
-      message: 'Deployment initiated',
-      status: ModelStatus.DEPLOYING,
+      deploymentId: deploymentResult.deploymentId,
+      message: deploymentResult.message,
+      status: deploymentResult.status,
       modelId,
       version,
     };
