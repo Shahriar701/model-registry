@@ -1,6 +1,5 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, GetCommand, QueryCommand, UpdateCommand, DeleteCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
-import { CloudWatchClient, PutMetricDataCommand } from '@aws-sdk/client-cloudwatch';
 import { S3Client, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { Logger } from './utils/logger';
 import { ModelRegistration, RegisterModelRequest, ListModelsRequest, ListModelsResponse, ModelSummary, DeploymentTriggerResponse, ModelStatus, ModelStatistics } from './types/model-types';
@@ -8,23 +7,30 @@ import { ModelRegistryError, ErrorType } from './utils/error-handler';
 import { VersionUtils } from './utils/version-utils';
 import { TeamAccessControl } from './auth/team-access-control';
 import { AuthContext } from './auth/auth-service';
+import { MetricsService, PerformanceMonitor, HealthService, AlertingService } from './monitoring';
 
 export class ModelRegistryService {
   private readonly dynamoClient: DynamoDBDocumentClient;
-  private readonly cloudWatchClient: CloudWatchClient;
   private readonly s3Client: S3Client;
   private readonly logger: Logger;
   private readonly tableName: string;
   private readonly teamAccessControl: TeamAccessControl;
+  private readonly metricsService: MetricsService;
+  private readonly performanceMonitor: PerformanceMonitor;
+  private readonly healthService: HealthService;
+  private readonly alertingService: AlertingService;
 
   constructor() {
     const dynamoDBClient = new DynamoDBClient({});
     this.dynamoClient = DynamoDBDocumentClient.from(dynamoDBClient);
-    this.cloudWatchClient = new CloudWatchClient({});
     this.s3Client = new S3Client({});
     this.logger = new Logger();
     this.tableName = process.env.MODELS_TABLE_NAME!;
     this.teamAccessControl = new TeamAccessControl();
+    this.metricsService = new MetricsService();
+    this.performanceMonitor = new PerformanceMonitor(this.metricsService);
+    this.healthService = new HealthService(this.metricsService);
+    this.alertingService = new AlertingService();
 
     if (!this.tableName) {
       throw new Error('MODELS_TABLE_NAME environment variable is required');
@@ -74,18 +80,25 @@ export class ModelRegistryService {
     };
 
     try {
-      await this.dynamoClient.send(new PutCommand({
-        TableName: this.tableName,
-        Item: modelRegistration,
-        ConditionExpression: 'attribute_not_exists(PK) AND attribute_not_exists(SK)',
-      }));
+      await this.performanceMonitor.recordDatabaseOperation(
+        'PutItem',
+        correlationId,
+        async () => {
+          await this.dynamoClient.send(new PutCommand({
+            TableName: this.tableName,
+            Item: modelRegistration,
+            ConditionExpression: 'attribute_not_exists(PK) AND attribute_not_exists(SK)',
+          }));
+        }
+      );
 
       // Emit CloudWatch metrics
-      await this.emitMetrics('ModelRegistered', 1, {
-        TeamId: request.teamId,
-        Framework: request.framework,
-        DeploymentTarget: request.deploymentTarget,
-      }, correlationId);
+      await this.metricsService.recordModelRegistration(
+        request.teamId,
+        request.framework,
+        request.deploymentTarget,
+        correlationId
+      );
 
       this.logger.info('Model registered successfully', {
         correlationId,
@@ -408,20 +421,24 @@ export class ModelRegistryService {
       correlationId
     );
 
-    const command = new DeleteCommand({
-      TableName: this.tableName,
-      Key: {
-        PK: `MODEL#${modelId}`,
-        SK: `VERSION#${version}`,
-      },
-    });
+    await this.performanceMonitor.recordDatabaseOperation(
+      'DeleteItem',
+      correlationId,
+      async () => {
+        const command = new DeleteCommand({
+          TableName: this.tableName,
+          Key: {
+            PK: `MODEL#${modelId}`,
+            SK: `VERSION#${version}`,
+          },
+        });
 
-    await this.dynamoClient.send(command);
+        await this.dynamoClient.send(command);
+      }
+    );
 
     // Emit CloudWatch metrics
-    await this.emitMetrics('ModelDeregistered', 1, {
-      TeamId: authContext.teamId,
-    }, correlationId);
+    await this.metricsService.recordModelDeregistration(authContext.teamId, correlationId);
   }
 
   async triggerDeployment(modelId: string, version: string, authContext: AuthContext, correlationId: string): Promise<DeploymentTriggerResponse> {
@@ -469,10 +486,11 @@ export class ModelRegistryService {
     // This would trigger the actual deployment pipeline
 
     // Emit CloudWatch metrics
-    await this.emitMetrics('DeploymentTriggered', 1, {
-      TeamId: model.teamId,
-      DeploymentTarget: model.deploymentTarget,
-    }, correlationId);
+    await this.metricsService.recordDeploymentTrigger(
+      model.teamId,
+      model.deploymentTarget,
+      correlationId
+    );
 
     return {
       deploymentId,
@@ -550,32 +568,53 @@ export class ModelRegistryService {
     };
   }
 
-  async healthCheck(correlationId: string): Promise<{ status: string; timestamp: string; dependencies: any }> {
-    this.logger.info('Health check requested', { correlationId });
+  async healthCheck(correlationId: string): Promise<{ status: string; timestamp: string; dependencies: any; [key: string]: any }> {
+    this.logger.info('Comprehensive health check requested', { correlationId });
 
-    const timestamp = new Date().toISOString();
-    const dependencies: any = {};
-
-    // Check DynamoDB connectivity
     try {
-      await this.dynamoClient.send(new GetCommand({
-        TableName: this.tableName,
-        Key: {
-          PK: 'HEALTH_CHECK',
-          SK: 'HEALTH_CHECK',
-        },
-      }));
-      dependencies.dynamodb = 'healthy';
+      const systemHealth = await this.healthService.performHealthCheck(correlationId);
+      
+      // Process health check for alerting
+      await this.alertingService.processHealthCheck(systemHealth, correlationId);
+
+      // Convert to legacy format for backward compatibility
+      const dependencies: any = {};
+      systemHealth.dependencies.forEach(dep => {
+        dependencies[dep.service.toLowerCase()] = dep.status;
+      });
+
+      return {
+        status: systemHealth.status,
+        timestamp: systemHealth.timestamp,
+        dependencies,
+        // Include additional details for enhanced monitoring
+        version: systemHealth.version,
+        uptime: systemHealth.uptime,
+        summary: systemHealth.summary,
+        detailedDependencies: systemHealth.dependencies,
+      };
     } catch (error) {
-      dependencies.dynamodb = 'unhealthy';
+      this.logger.error('Health check failed', {
+        correlationId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+
+      // Fallback to simple health check
+      return await this.simpleHealthCheck(correlationId);
     }
+  }
 
-    const overallStatus = Object.values(dependencies).every(status => status === 'healthy') ? 'healthy' : 'unhealthy';
+  async simpleHealthCheck(correlationId: string): Promise<{ status: string; timestamp: string; dependencies: any }> {
+    this.logger.info('Simple health check requested', { correlationId });
 
+    const result = await this.healthService.getSimpleHealthStatus(correlationId);
+    
     return {
-      status: overallStatus,
-      timestamp,
-      dependencies,
+      status: result.status,
+      timestamp: result.timestamp,
+      dependencies: {
+        dynamodb: result.status,
+      },
     };
   }
 
@@ -657,26 +696,5 @@ export class ModelRegistryService {
       .replace(/^-|-$/g, '');
   }
 
-  private async emitMetrics(metricName: string, value: number, dimensions: Record<string, string>, correlationId: string): Promise<void> {
-    try {
-      const command = new PutMetricDataCommand({
-        Namespace: process.env.METRICS_NAMESPACE || 'ModelRegistry',
-        MetricData: [{
-          MetricName: metricName,
-          Value: value,
-          Unit: 'Count',
-          Dimensions: Object.entries(dimensions).map(([Name, Value]) => ({ Name, Value })),
-          Timestamp: new Date(),
-        }],
-      });
 
-      await this.cloudWatchClient.send(command);
-    } catch (error) {
-      this.logger.warn('Failed to emit metrics', {
-        correlationId,
-        metricName,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
 }
