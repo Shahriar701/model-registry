@@ -1,0 +1,218 @@
+{
+  "info": {
+    "name": "Model Registry API",
+    "description": "API collection for ML Model Registry service",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{api_key}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "auth": {
+          "type": "noauth"
+        },
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/health",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "health"]
+        },
+        "description": "Check the health status of the Model Registry service"
+      }
+    },
+    {
+      "name": "Register Model",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"modelName\": \"my-tensorflow-model\",\n  \"version\": \"1.0.0\",\n  \"framework\": \"tensorflow\",\n  \"s3Uri\": \"s3://my-models-bucket/tensorflow-model-v1\",\n  \"deploymentTarget\": \"EKS\",\n  \"metadata\": {\n    \"description\": \"Image classification model\",\n    \"accuracy\": 0.95,\n    \"features\": [\"image_input\"],\n    \"modelSize\": 150000000,\n    \"trainingDataset\": \"ImageNet subset\",\n    \"tags\": [\"computer-vision\", \"classification\"]\n  }\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/v1/models",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "models"]
+        },
+        "description": "Register a new ML model in the registry"
+      }
+    },
+    {
+      "name": "List Models",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/models?limit=10",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "models"],
+          "query": [
+            {
+              "key": "limit",
+              "value": "10"
+            },
+            {
+              "key": "deploymentTarget",
+              "value": "EKS",
+              "disabled": true
+            },
+            {
+              "key": "framework",
+              "value": "tensorflow",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "List all registered models with optional filters"
+      }
+    },
+    {
+      "name": "Get Model Versions",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/models/:modelId",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "models", ":modelId"],
+          "variable": [
+            {
+              "key": "modelId",
+              "value": "my-tensorflow-model"
+            }
+          ]
+        },
+        "description": "Get all versions of a specific model"
+      }
+    },
+    {
+      "name": "Get Model Version",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/models/:modelId/:version",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "models", ":modelId", ":version"],
+          "variable": [
+            {
+              "key": "modelId",
+              "value": "my-tensorflow-model"
+            },
+            {
+              "key": "version",
+              "value": "1.0.0"
+            }
+          ]
+        },
+        "description": "Get a specific version of a model"
+      }
+    },
+    {
+      "name": "Update Model Metadata",
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"metadata\": {\n    \"description\": \"Updated image classification model\",\n    \"accuracy\": 0.97,\n    \"tags\": [\"computer-vision\", \"classification\", \"production\"]\n  },\n  \"status\": \"ACTIVE\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/v1/models/:modelId/:version",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "models", ":modelId", ":version"],
+          "variable": [
+            {
+              "key": "modelId",
+              "value": "my-tensorflow-model"
+            },
+            {
+              "key": "version",
+              "value": "1.0.0"
+            }
+          ]
+        },
+        "description": "Update metadata for a specific model version"
+      }
+    },
+    {
+      "name": "Deploy Model",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/models/:modelId/:version/deploy",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "models", ":modelId", ":version", "deploy"],
+          "variable": [
+            {
+              "key": "modelId",
+              "value": "my-tensorflow-model"
+            },
+            {
+              "key": "version",
+              "value": "1.0.0"
+            }
+          ]
+        },
+        "description": "Trigger deployment for a specific model version"
+      }
+    },
+    {
+      "name": "Delete Model Version",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/models/:modelId/:version",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "models", ":modelId", ":version"],
+          "variable": [
+            {
+              "key": "modelId",
+              "value": "my-tensorflow-model"
+            },
+            {
+              "key": "version",
+              "value": "1.0.0"
+            }
+          ]
+        },
+        "description": "Deregister a specific model version"
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://4ii98ok8he.execute-api.us-east-1.amazonaws.com/v1",
+      "type": "string"
+    },
+    {
+      "key": "api_key",
+      "value": "mr_demo_dev123456789",
+      "type": "string"
+    }
+  ]
+}

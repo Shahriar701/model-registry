@@ -1,0 +1,60 @@
+{
+  "environment": "staging",
+  "aws": {
+    "region": "us-east-1",
+    "account": "123456789012"
+  },
+  "modelRegistry": {
+    "logLevel": "INFO",
+    "corsOrigins": ["https://staging.example.com"],
+    "rateLimiting": {
+      "enabled": true,
+      "requestsPerMinute": 500
+    },
+    "monitoring": {
+      "metricsEnabled": true,
+      "tracingEnabled": true,
+      "detailedLogging": false
+    }
+  },
+  "dynamodb": {
+    "billingMode": "PAY_PER_REQUEST",
+    "pointInTimeRecovery": true,
+    "encryption": "CUSTOMER_MANAGED",
+    "removalPolicy": "RETAIN"
+  },
+  "lambda": {
+    "memorySize": 512,
+    "timeout": 30,
+    "reservedConcurrency": 50,
+    "environment": {
+      "LOG_LEVEL": "INFO",
+      "NODE_ENV": "staging"
+    }
+  },
+  "apiGateway": {
+    "throttling": {
+      "rateLimit": 500,
+      "burstLimit": 1000
+    },
+    "logging": {
+      "level": "INFO",
+      "dataTrace": false
+    },
+    "caching": {
+      "enabled": true,
+      "ttl": 300
+    }
+  },
+  "security": {
+    "apiKeyRequired": true,
+    "corsEnabled": true,
+    "requestValidation": true
+  },
+  "features": {
+    "aiAssistantIntegration": true,
+    "deploymentPipeline": true,
+    "auditLogging": true,
+    "metricsCollection": true
+  }
+}

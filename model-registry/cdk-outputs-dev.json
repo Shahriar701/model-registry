@@ -1,0 +1,8 @@
+{
+  "ModelRegistryStack-dev": {
+    "ModelRegistryApiUrl": "https://4ii98ok8he.execute-api.us-east-1.amazonaws.com/v1/",
+    "ModelRegistryLambdaArn": "arn:aws:lambda:us-east-1:084828566306:function:model-registry-dev-handler",
+    "ModelRegistryApiEndpointD9AA8738": "https://4ii98ok8he.execute-api.us-east-1.amazonaws.com/v1/",
+    "ModelRegistryTableName": "model-registry-dev-models"
+  }
+}

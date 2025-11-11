@@ -1,0 +1,59 @@
+{
+  "environment": "dev",
+  "aws": {
+    "region": "us-east-1",
+    "account": "084828566306"
+  },
+  "modelRegistry": {
+    "logLevel": "DEBUG",
+    "corsOrigins": ["*"],
+    "rateLimiting": {
+      "enabled": true,
+      "requestsPerMinute": 1000
+    },
+    "monitoring": {
+      "metricsEnabled": true,
+      "tracingEnabled": true,
+      "detailedLogging": true
+    }
+  },
+  "dynamodb": {
+    "billingMode": "PAY_PER_REQUEST",
+    "pointInTimeRecovery": true,
+    "encryption": "AWS_MANAGED",
+    "removalPolicy": "DESTROY"
+  },
+  "lambda": {
+    "memorySize": 512,
+    "timeout": 30,
+    "reservedConcurrency": null,
+    "environment": {
+      "LOG_LEVEL": "DEBUG",
+      "NODE_ENV": "development"
+    }
+  },
+  "apiGateway": {
+    "throttling": {
+      "rateLimit": 1000,
+      "burstLimit": 2000
+    },
+    "logging": {
+      "level": "INFO",
+      "dataTrace": true
+    },
+    "caching": {
+      "enabled": false
+    }
+  },
+  "security": {
+    "apiKeyRequired": false,
+    "corsEnabled": true,
+    "requestValidation": true
+  },
+  "features": {
+    "aiAssistantIntegration": true,
+    "deploymentPipeline": true,
+    "auditLogging": true,
+    "metricsCollection": true
+  }
+}

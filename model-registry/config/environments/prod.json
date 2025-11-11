@@ -1,0 +1,73 @@
+{
+  "environment": "prod",
+  "aws": {
+    "region": "us-east-1",
+    "account": "987654321098"
+  },
+  "modelRegistry": {
+    "logLevel": "WARN",
+    "corsOrigins": ["https://app.example.com"],
+    "rateLimiting": {
+      "enabled": true,
+      "requestsPerMinute": 200
+    },
+    "monitoring": {
+      "metricsEnabled": true,
+      "tracingEnabled": true,
+      "detailedLogging": false
+    }
+  },
+  "dynamodb": {
+    "billingMode": "PROVISIONED",
+    "readCapacity": 10,
+    "writeCapacity": 5,
+    "pointInTimeRecovery": true,
+    "encryption": "CUSTOMER_MANAGED",
+    "removalPolicy": "RETAIN",
+    "backupEnabled": true
+  },
+  "lambda": {
+    "memorySize": 1024,
+    "timeout": 30,
+    "reservedConcurrency": 100,
+    "environment": {
+      "LOG_LEVEL": "WARN",
+      "NODE_ENV": "production"
+    }
+  },
+  "apiGateway": {
+    "throttling": {
+      "rateLimit": 200,
+      "burstLimit": 400
+    },
+    "logging": {
+      "level": "ERROR",
+      "dataTrace": false
+    },
+    "caching": {
+      "enabled": true,
+      "ttl": 600
+    }
+  },
+  "security": {
+    "apiKeyRequired": true,
+    "corsEnabled": true,
+    "requestValidation": true,
+    "wafEnabled": true
+  },
+  "features": {
+    "aiAssistantIntegration": true,
+    "deploymentPipeline": true,
+    "auditLogging": true,
+    "metricsCollection": true
+  },
+  "alerting": {
+    "enabled": true,
+    "snsTopicArn": "arn:aws:sns:us-east-1:987654321098:model-registry-alerts",
+    "thresholds": {
+      "errorRate": 0.05,
+      "latency": 5000,
+      "throttling": 0.01
+    }
+  }
+}
